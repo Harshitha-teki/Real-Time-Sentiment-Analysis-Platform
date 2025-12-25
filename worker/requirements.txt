@@ -1,0 +1,4 @@
+redis
+transformers>=4.48.0
+sqlalchemy
+psycopg2-binary
