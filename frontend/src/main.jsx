@@ -1,9 +1,14 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
+import React from "react";
+import { createRoot } from "react-dom/client";
+import Dashboard from "./components/Dashboard";
+import "./index.css";
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <h1>Sentiment Analysis Live Dashboard</h1>
-    <p>Connecting to WebSocket...</p>
-  </React.StrictMode>
-)
+const rootElement = document.getElementById("root");
+if (rootElement) {
+  const root = createRoot(rootElement);
+  root.render(
+    <React.StrictMode>
+      <Dashboard />
+    </React.StrictMode>
+  );
+}

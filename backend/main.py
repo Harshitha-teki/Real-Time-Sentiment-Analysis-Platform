@@ -1,171 +1,118 @@
-from fastapi import FastAPI, Query, Depends, HTTPException
+from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
 import json
+import asyncio
 import redis.asyncio as redis
+from typing import List
 
-# Use absolute imports to ensure package runs correctly inside container
-from backend.database import get_db, engine
-from backend.models import SocialMediaPost, SentimentAnalysis
+# Ensure these match your database.py and updated models.py
+from database import get_db, engine, AsyncSessionLocal
+from models import Base, Post, SentimentAnalysis
 
-app = FastAPI(title="Sentiment Analysis API")
-# Connect to redis service defined in docker-compose
+app = FastAPI(title="Real-Time Sentiment Analysis API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Simplified for troubleshooting
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 rd = redis.from_url("redis://redis:6379/0", decode_responses=True)
 
-# Endpoint 1: Health Check (4.1.1)
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+    async def broadcast_json(self, message: dict):
+        for ws in list(self.active_connections):
+            try: await ws.send_json(message)
+            except: self.disconnect(ws)
+
+manager = ConnectionManager()
+
+async def redis_listener():
+    pubsub = rd.pubsub()
+    await pubsub.subscribe("sentiment_updates")
+    async for message in pubsub.listen():
+        if message.get("type") == "message":
+            try:
+                data = json.loads(message["data"])
+                await manager.broadcast_json({"type": "new_post", "data": data})
+            except: pass
+
+async def metrics_broadcaster():
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                # Aggregate counts from SentimentAnalysis
+                q = select(SentimentAnalysis.sentiment_label, func.count()).group_by(SentimentAnalysis.sentiment_label)
+                res = await session.execute(q)
+                counts = {r[0]: r[1] for r in res.all()}
+                await manager.broadcast_json({"type": "metrics_update", "data": {"last_24_hours": counts}})
+        except: pass
+        await asyncio.sleep(10)
+
+@app.on_event("startup")
+async def startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    asyncio.create_task(redis_listener())
+    asyncio.create_task(metrics_broadcaster())
+
 @app.get("/api/health")
-async def health_check(db: AsyncSession = Depends(get_db)):
-    try:
-        await db.execute(text("SELECT 1"))
-        db_status = "connected"
-    except Exception:
-        db_status = "disconnected"
-    
-    try:
-        await rd.ping()
-        redis_status = "connected"
-    except Exception:
-        redis_status = "disconnected"
-    
-    status = "healthy" if db_status == "connected" and redis_status == "connected" else "unhealthy"
-    return {
-        "status": status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "services": {"database": db_status, "redis": redis_status}
-    }
+async def health_check():
+    return {"status": "healthy"}
 
-# Endpoint 2: Get Posts (4.1.2)
 @app.get("/api/posts")
-async def get_posts(
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    sentiment: Optional[str] = None,
-    source: Optional[str] = None,
-    start_ts: Optional[datetime] = None,
-    end_ts: Optional[datetime] = None,
-    db: AsyncSession = Depends(get_db)
-):
-    # Base query joining posts with their sentiment analysis
-    query = select(SocialMediaPost, SentimentAnalysis).join(SentimentAnalysis)
-
-    # Apply filters
-    if sentiment:
-        query = query.where(SentimentAnalysis.sentiment_label == sentiment)
-    if source:
-        query = query.where(SocialMediaPost.source == source)
-    if start_ts:
-        query = query.where(SocialMediaPost.created_at >= start_ts)
-    if end_ts:
-        query = query.where(SocialMediaPost.created_at <= end_ts)
-
-    total_q = select(func.count()).select_from(SocialMediaPost).join(SentimentAnalysis)
-    if sentiment:
-        total_q = total_q.where(SentimentAnalysis.sentiment_label == sentiment)
-    if source:
-        total_q = total_q.where(SocialMediaPost.source == source)
-    if start_ts:
-        total_q = total_q.where(SocialMediaPost.created_at >= start_ts)
-    if end_ts:
-        total_q = total_q.where(SocialMediaPost.created_at <= end_ts)
-
-    # paging and ordering
-    query = query.order_by(SocialMediaPost.created_at.desc()).offset(offset).limit(limit)
-
-    total_res = await db.execute(total_q)
-    total_count = total_res.scalar_one()
-
-    result = await db.execute(query)
-    rows = result.all()
-
-    posts: List[Dict[str, Any]] = []
-    for row in rows:
-        post_obj = row[0]
-        analysis_obj = row[1]
-        posts.append({
-            "id": post_obj.id,
-            "post_id": post_obj.post_id,
-            "source": post_obj.source,
-            "content": post_obj.content,
-            "author": post_obj.author,
-            "created_at": post_obj.created_at.isoformat() if post_obj.created_at else None,
-            "sentiment": {
-                "label": analysis_obj.sentiment_label,
-                "confidence": analysis_obj.confidence_score,
-                "emotion": analysis_obj.emotion,
-                "model": analysis_obj.model_name
-            }
-        })
-
-    return {"posts": posts, "limit": limit, "offset": offset, "total": total_count}
-
-# Endpoint 4: Sentiment Distribution with Caching (4.1.4)
-@app.get("/api/sentiment/distribution")
-async def get_distribution(hours: int = Query(24, ge=1, le=168), db: AsyncSession = Depends(get_db)):
-    cache_key = f"dist_{hours}"
-    cached = await rd.get(cache_key)
-    
-    if cached:
-        return {**json.loads(cached), "cached": True}
-    # Compute time window
-    start_ts = datetime.utcnow() - timedelta(hours=hours)
-
-    q = select(SentimentAnalysis.sentiment_label, func.count().label("cnt")).join(SocialMediaPost).where(SocialMediaPost.created_at >= start_ts).group_by(SentimentAnalysis.sentiment_label)
-    res = await db.execute(q)
+async def get_posts(limit: int = 10, db: AsyncSession = Depends(get_db)):
+    # Join posts with latest analysis entries and return the most recent ones
+    query = (
+        select(Post.content, SentimentAnalysis.sentiment_label, Post.post_id)
+        .join(SentimentAnalysis, SentimentAnalysis.post_id == Post.id)
+        .order_by(SentimentAnalysis.id.desc())
+        .limit(limit)
+    )
+    res = await db.execute(query)
     rows = res.all()
+    return {"posts": [{"content": r[0], "sentiment": r[1], "id": r[2]} for r in rows]}
 
-    dist = {"positive": 0, "negative": 0, "neutral": 0}
-    total = 0
-    for label, cnt in rows:
-        if label in dist:
-            dist[label] = cnt
-        else:
-            dist[label] = cnt
-        total += cnt
-
-    result_data = {
-        "timeframe_hours": hours,
-        "distribution": dist,
-        "total": total,
-        "cached": False,
-        "cached_at": datetime.utcnow().isoformat()
-    }
-
-    # Cache for 60 seconds
-    try:
-        await rd.setex(cache_key, 60, json.dumps(result_data))
-    except Exception:
-        # don't fail the request if redis is unavailable
-        pass
-
-    return result_data
-
-
+@app.get("/api/sentiment/distribution")
+async def get_sentiment_distribution(db: AsyncSession = Depends(get_db)):
+    q = select(SentimentAnalysis.sentiment_label, func.count()).group_by(SentimentAnalysis.sentiment_label)
+    res = await db.execute(q)
+    dist = {r[0]: r[1] for r in res.all()}
+    return {"distribution": dist or {"neutral": 0}, "total": sum(dist.values())}
 
 @app.get("/api/sentiment/aggregate")
-async def sentiment_aggregate(hours: int = Query(24, ge=1, le=168), interval: str = Query("hour"), db: AsyncSession = Depends(get_db)):
-    """Return time-bucketed sentiment counts over the past `hours`.
-    interval: 'hour' or 'day'
-    """
-    if interval not in ("hour", "day"):
-        raise HTTPException(status_code=400, detail="interval must be 'hour' or 'day'")
+async def get_sentiment_aggregate(period: str = Query("hour"), db: AsyncSession = Depends(get_db)):
+    bucket = func.date_trunc(period, SentimentAnalysis.created_at).label("ts")
+    query = (
+        select(bucket, SentimentAnalysis.sentiment_label, func.count())
+        .group_by(bucket, SentimentAnalysis.sentiment_label)
+        .order_by(bucket)
+    )
+    res = await db.execute(query)
+    return {"data": [{"ts": r[0], "label": r[1], "count": r[2]} for r in res.all()]}
 
-    start_ts = datetime.utcnow() - timedelta(hours=hours)
+@app.websocket("/ws/sentiment")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True: await websocket.receive_text()
+    except WebSocketDisconnect: manager.disconnect(websocket)
 
-    # Use date_trunc via SQLAlchemy func
-    bucket = func.date_trunc(interval, SocialMediaPost.created_at).label("bucket")
-    q = select(bucket, SentimentAnalysis.sentiment_label, func.count().label("cnt")).join(SocialMediaPost).where(SocialMediaPost.created_at >= start_ts).group_by(bucket, SentimentAnalysis.sentiment_label).order_by(bucket)
 
-    res = await db.execute(q)
-    rows = res.all()
-
-    # organize into {bucket: {label: count}}
-    out: Dict[str, Dict[str, int]] = {}
-    for bucket_val, label, cnt in rows:
-        b = bucket_val.isoformat() if hasattr(bucket_val, 'isoformat') else str(bucket_val)
-        if b not in out:
-            out[b] = {"positive": 0, "negative": 0, "neutral": 0}
-        out[b][label] = cnt
-
-    return {"interval": interval, "hours": hours, "buckets": out}
+if __name__ == "__main__":
+    # Run with Uvicorn when executing this module directly (used by docker-compose)
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")

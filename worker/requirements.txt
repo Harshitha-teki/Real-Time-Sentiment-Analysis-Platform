@@ -1,4 +1,6 @@
 redis
 transformers>=4.48.0
-sqlalchemy
+sqlalchemy>=2.0
+asyncpg
+# Add psycopg2-binary for synchronous DB usage in the worker
 psycopg2-binary

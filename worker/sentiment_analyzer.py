@@ -21,7 +21,6 @@ class SentimentAnalyzer:
                 "sentiment-analysis",
                 model="distilbert-base-uncased-finetuned-sst-2-english",
                 device=device,
-                use_safetensors=True
             )
 
             # 2. Emotion Pipeline (Joy, Anger, Fear, etc.)
@@ -29,7 +28,6 @@ class SentimentAnalyzer:
                 "text-classification",
                 model="j-hartmann/emotion-english-distilroberta-base",
                 device=device,
-                use_safetensors=True
             )
             
             logger.info("✅ AI Models Loaded Successfully.")

@@ -2,56 +2,29 @@ services:
   # 1. Database Service
   db:
     image: postgres:15-alpine
-    # Explicitly load the file for the host to see during startup
-    env_file: .env 
+    env_file: .env
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-sentiment_user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_pass_123}
-      - POSTGRES_DB=${POSTGRES_DB:-sentiment_db}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     healthcheck:
-      # Note: We use the variables here too
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # 2. Message Queue Service
+  # 2. Message Queue
   redis:
     image: redis:7-alpine
-    command: redis-server --save 60 1 --loglevel warning
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
 
-  # 3. Ingester Service
-  ingester:
-    build: ./ingester
-    environment:
-      - PYTHONUNBUFFERED=1  # <--- This forces logs to show up immediately
-    depends_on:
-      redis:
-        condition: service_healthy
-    env_file: .env
-    restart: always
-
-  # 4. Worker Service
-  worker:
-    build: ./worker
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - PYTHONUNBUFFERED=1
-    env_file: .env
-    restart: always
-
-  # 5. Backend API Service
+  # 3. Backend API
   backend:
     build: ./backend
     ports:
@@ -62,13 +35,35 @@ services:
       redis:
         condition: service_healthy
     env_file: .env
+    # This command ensures the container stays alive
+    command: python main.py
     restart: always
 
-  # 6. Frontend Service
+  # 4. Worker (AI Processing)
+  worker:
+    build: ./worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    restart: always
+
+  # 5. Ingester (Data Simulation)
+  ingester:
+    build: ./ingester
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    restart: always
+
+  # 6. Frontend
   frontend:
     build: ./frontend
     ports:
-      - "3000:3000"
+      - "3000:5173"
     depends_on:
       - backend
     restart: always
