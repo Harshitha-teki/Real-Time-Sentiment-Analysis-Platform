@@ -73,3 +73,14 @@ async def test_background_worker_logic():
             await metrics_broadcaster()
         except asyncio.CancelledError:
             pass # Successfully hit the logic and exited at sleep
+
+
+@pytest.mark.asyncio
+async def test_aggregate_endpoint_logic(setup_db):
+    """Specifically targets the time-bucketed aggregation logic."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # Testing different time periods (hour, day)
+        for period in ["hour", "day"]:
+            response = await ac.get(f"/api/sentiment/aggregate?period={period}")
+            assert response.status_code == 200
+            assert "data" in response.json()
