@@ -1,9 +1,10 @@
 fastapi
-uvicorn[standard]
-sqlalchemy>=2.0
+uvicorn
+sqlalchemy[asyncio]
 asyncpg
 redis
-psycopg2-binary
-pytest==8.0.0
-pytest-cov==4.1.0
-httpx==0.26.0
+pytest
+pytest-cov
+httpx
+anyio
+pytest-asyncio

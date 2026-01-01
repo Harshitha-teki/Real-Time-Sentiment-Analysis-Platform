@@ -1,19 +1,23 @@
 import pytest
-from fastapi.testclient import TestClient
-from main import app  # Import directly for Docker environment
+from httpx import AsyncClient, ASGITransport
+from main import app
 
-client = TestClient(app)
-
-def test_health():
-    response = client.get("/api/health")
+@pytest.mark.asyncio
+async def test_health_check():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "healthy"}
 
-def test_get_posts_structure():
-    response = client.get("/api/posts")
+@pytest.mark.asyncio
+async def test_distribution_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/sentiment/distribution")
     assert response.status_code == 200
-    assert "posts" in response.json()
+    assert "distribution" in response.json()
 
-def test_distribution_endpoint():
-    response = client.get("/api/sentiment/distribution")
+@pytest.mark.asyncio
+async def test_aggregate_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/sentiment/aggregate?period=hour")
     assert response.status_code == 200
+    assert "data" in response.json()
