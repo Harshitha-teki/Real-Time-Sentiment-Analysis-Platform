@@ -21,3 +21,15 @@ Follow these steps to get the platform running locally:
 2. **Start the platform**:
    ```bash
    docker-compose up -d --build
+
+
+3. **Initialize the Database**
+Once all containers show as Running or Healthy in Docker Desktop, initialize the database schema by running:
+docker-compose exec backend python -c "import asyncio; from database import engine; from models import Base; async def init(): async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all); print('--- DATABASE SCHEMA INITIALIZED ---'); asyncio.run(init())"
+
+4. **Access the Dashboard**
+Main Dashboard: http://localhost:3000
+
+API Documentation: http://localhost:8000/docs
+
+JSON Data Feed: http://localhost:8000/api/posts
